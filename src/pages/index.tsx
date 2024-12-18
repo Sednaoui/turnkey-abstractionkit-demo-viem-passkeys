@@ -4,8 +4,14 @@ import Image from "next/image";
 import { useForm } from "react-hook-form";
 import axios from "axios";
 import { useState, useEffect } from "react";
-import { createWalletClient, http } from "viem";
+import { createWalletClient, http, zeroAddress } from "viem";
 import { sepolia } from "viem/chains";
+import {
+  CandidePaymaster,
+  MetaTransaction,
+  SafeAccountV0_3_0 as SafeAccount,
+} from "abstractionkit";
+
 import styles from "./index.module.css";
 import { TWalletDetails } from "../types";
 
@@ -28,12 +34,20 @@ const humanReadableDateTime = (): string => {
   return new Date().toLocaleString().replaceAll("/", "-").replaceAll(":", ".");
 };
 
+const bundlerUrl = process.env.NEXT_PUBLIC_BUNDLER_URL as string;
+const chainId = BigInt(process.env.NEXT_PUBLIC_CHAIN_ID as string);
+const paymasterUrl = process.env.NEXT_PUBLIC_PAYMASTER_RPC as string;
+const nodeUrl = process.env.NEXT_PUBLIC_JSON_RPC_NODE_PROVIDER as string;
+const sponsorshipId = process.env.NEXT_PUBLIC_SPONSORSHIP_ID as string;
+
 export default function Home() {
   const { turnkey, passkeyClient } = useTurnkey();
 
   // Wallet is used as a proxy for logged-in state
   const [wallet, setWallet] = useState<TWalletState>(null);
-  const [signedMessage, setSignedMessage] = useState<TSignedMessage>(null);
+  const [smartWallet, setSmartWallet] = useState<SafeAccount>();
+  const [txHash, setTxHash] = useState<string>("");
+  const [userOpHash, setUserOpHash] = useState<string>("");
 
   const { handleSubmit: subOrgFormSubmit } = useForm<subOrgFormData>();
   const { register: signingFormRegister, handleSubmit: signingFormSubmit } =
@@ -51,31 +65,79 @@ export default function Home() {
   });
 
   const signMessage = async (data: signingFormData) => {
-    if (!wallet) {
-      throw new Error("wallet not found");
+    try {
+      setTxHash("");
+      setUserOpHash("");
+      if (!wallet || !smartWallet) {
+        throw new Error("wallet not found");
+      }
+
+      const viemAccount = await createAccount({
+        client: passkeyClient!,
+        organizationId: wallet.subOrgId,
+        signWith: wallet.address,
+        ethereumAddress: wallet.address,
+      });
+
+      const viemClient = createWalletClient({
+        account: viemAccount,
+        chain: sepolia,
+        transport: http(),
+      });
+
+      const transaction: MetaTransaction = {
+        to: zeroAddress,
+        value: BigInt(0),
+        data: "0x",
+      };
+
+      let userOperation = await smartWallet.createUserOperation(
+        [transaction],
+        nodeUrl,
+        bundlerUrl
+      );
+
+      const paymaster = new CandidePaymaster(paymasterUrl);
+      const paymasterUserOp =
+        await paymaster.createSponsorPaymasterUserOperation(
+          userOperation,
+          bundlerUrl,
+          sponsorshipId
+        );
+      userOperation = paymasterUserOp[0];
+
+      const { domain, types, messageValue } =
+        SafeAccount.getUserOperationEip712Data(userOperation, chainId);
+
+      const eip712Signature = await viemClient.signTypedData({
+        domain,
+        types,
+        message: messageValue,
+        primaryType: "SafeOp",
+      } as any);
+
+      userOperation.signature =
+        SafeAccount.formatEip712SignaturesToUseroperationSignature(
+          [wallet.address],
+          [eip712Signature]
+        );
+
+      const sendUserOpResponse = await smartWallet.sendUserOperation(
+        userOperation,
+        bundlerUrl
+      );
+      setUserOpHash(sendUserOpResponse.userOperationHash);
+
+      const receiptResult = await sendUserOpResponse.included();
+      setTxHash(receiptResult.receipt.transactionHash);
+    } catch (error) {
+      console.error("Error:", error);
+      alert(
+        `Failed to submit user operation: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
     }
-
-    const viemAccount = await createAccount({
-      client: passkeyClient!,
-      organizationId: wallet.subOrgId,
-      signWith: wallet.address,
-      ethereumAddress: wallet.address,
-    });
-
-    const viemClient = createWalletClient({
-      account: viemAccount,
-      chain: sepolia,
-      transport: http(),
-    });
-
-    const signedMessage = await viemClient.signMessage({
-      message: data.messageToSign,
-    });
-
-    setSignedMessage({
-      message: data.messageToSign,
-      signature: signedMessage,
-    });
   };
 
   const createSubOrgAndWallet = async () => {
@@ -104,6 +166,9 @@ export default function Home() {
     });
 
     const response = res.data as TWalletDetails;
+    const smartAccount = SafeAccount.initializeNewAccount([response.address]);
+
+    setSmartWallet(smartAccount);
     setWallet(response);
   };
 
@@ -140,6 +205,11 @@ export default function Home() {
         address: walletAccountsResponse?.accounts[0].address,
         subOrgId: loginResponse.organizationId,
       } as TWalletDetails);
+
+      const smartAccount = SafeAccount.initializeNewAccount([
+        walletAccountsResponse?.accounts[0].address,
+      ]);
+      setSmartWallet(smartAccount);
     } catch (e: any) {
       const message = `caught error: ${e.toString()}`;
       console.error(message);
@@ -149,11 +219,7 @@ export default function Home() {
 
   return (
     <main className={styles.main}>
-      <a
-        href="https://turnkey.com"
-        target="_blank"
-        rel="noopener noreferrer"
-      >
+      <a href="https://turnkey.com" target="_blank" rel="noopener noreferrer">
         <Image
           src="/logo.svg"
           alt="Turnkey Logo"
@@ -172,27 +238,25 @@ export default function Home() {
         )}
         {wallet && (
           <div className={styles.info}>
-            ETH address: <br />
-            <span className={styles.code}>{wallet.address}</span>
+            Smart Account Address: <br />
+            <span className={styles.code}>{smartWallet?.accountAddress}</span>
           </div>
         )}
-        {signedMessage && (
+        {userOpHash && (
           <div className={styles.info}>
-            Message: <br />
-            <span className={styles.code}>{signedMessage.message}</span>
+            UserOp submited. Waiting for inclusion..
+            <br />
+            Track the UserOpHash: <br />
+            <span className={styles.code}>{userOpHash}</span>
             <br />
             <br />
-            Signature: <br />
-            <span className={styles.code}>{signedMessage.signature}</span>
+          </div>
+        )}
+        {txHash && (
+          <div className={styles.info}>
+            Transaction Hash: <br />
+            <span className={styles.code}>{txHash}</span>
             <br />
-            <br />
-            <a
-              href="https://etherscan.io/verifiedSignatures"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Verify with Etherscan
-            </a>
           </div>
         )}
       </div>
@@ -249,10 +313,7 @@ export default function Home() {
               Whoami endpoint.
             </a>
           </p>
-          <form
-            className={styles.form}
-            onSubmit={loginFormSubmit(login)}
-          >
+          <form className={styles.form} onSubmit={loginFormSubmit(login)}>
             <input
               className={styles.button}
               type="submit"
@@ -263,15 +324,15 @@ export default function Home() {
       )}
       {wallet !== null && (
         <div>
-          <h2>Now let&apos;s sign something!</h2>
+          <h2>Now let&apos;s submit a userOp!</h2>
           <p className={styles.explainer}>
-            We&apos;ll use a{" "}
+            We&apos;ll use Turnkey as an owner to the smart account{" "}
             <a
               href="https://viem.sh/docs/accounts/custom.html"
               target="_blank"
               rel="noopener noreferrer"
             >
-              Viem custom account
+              with Viem custom account
             </a>{" "}
             to do this, using{" "}
             <a
@@ -281,23 +342,12 @@ export default function Home() {
             >
               @turnkey/viem
             </a>
-            . You can kill your NextJS server if you want, everything happens on
-            the client-side!
           </p>
           <form
             className={styles.form}
             onSubmit={signingFormSubmit(signMessage)}
           >
-            <input
-              className={styles.input}
-              {...signingFormRegister("messageToSign")}
-              placeholder="Write something to sign..."
-            />
-            <input
-              className={styles.button}
-              type="submit"
-              value="Sign Message"
-            />
+            <input className={styles.button} type="submit" value="Submit" />
           </form>
         </div>
       )}

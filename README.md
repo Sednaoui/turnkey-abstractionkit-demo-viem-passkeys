@@ -1,4 +1,7 @@
-# Demo Viem 🤝 Passkeys
+# Demo Viem 🤝 Passkeys 🤝 Abstractionkit
+
+This repo is a fork from Turnkey Passkey demo to demonstrate how to use smart accounts controlled by
+a hosted Turnkey Signer.
 
 This repo contains a sample application **for demonstration purposes only**, walking through how to create sub-organizations, create private keys, and sign with the [`@turnkey/viem`](https://github.com/tkhq/sdk/tree/main/packages/viem) signer, using passkeys. Please feel free to clone or fork this repo, or file an issue if there are improvements to be made! ❤️
 
